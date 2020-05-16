@@ -3,17 +3,10 @@ package fastreword;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.LogCommand;
 import org.eclipse.jgit.api.errors.GitAPIException;
-import org.eclipse.jgit.lib.CommitBuilder;
-import org.eclipse.jgit.lib.ObjectId;
-import org.eclipse.jgit.lib.ObjectInserter;
-import org.eclipse.jgit.lib.Repository;
-import org.eclipse.jgit.revplot.PlotCommit;
-import org.eclipse.jgit.revplot.PlotCommitList;
-import org.eclipse.jgit.revplot.PlotLane;
-import org.eclipse.jgit.revplot.PlotWalk;
+import org.eclipse.jgit.lib.*;
 import org.eclipse.jgit.revwalk.RevCommit;
-import org.eclipse.jgit.revwalk.RevCommitList;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.revwalk.filter.RevFilter;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 
 import java.io.File;
@@ -22,95 +15,61 @@ import java.util.*;
 
 public class Main {
     private static Repository repo;
+    private static RevCommit headCommit;
+    private static RevCommit renameCommit;
+    private static RevWalk walk;
 
-    private static void rebaseBamboo(Repository repo, List<RevCommit> queue, ObjectId newBase) throws IOException {
-        ObjectInserter inserter = repo.getObjectDatabase().newInserter();
-        CommitBuilder cb = new CommitBuilder();
-        for (RevCommit cmt : queue) {
-            cb.setAuthor(cmt.getAuthorIdent());
-            cb.setCommitter(cmt.getCommitterIdent());
-            cb.setMessage(cmt.getFullMessage());
-            cb.setParentId(newBase);
-            cb.setTreeId(cmt.getTree());
-            newBase = inserter.insert(cb);
+    /*
+     * Generates topologically sorted list of dependant commits to be regenerated after commit rename
+     *
+     * Loosely based on JGit's calculatePickList() function
+     * We do not need transactionality as JGit, so file operations are replaced with map access
+     *
+     * Repo:
+     * Source: /org.eclipse.jgit/src/org/eclipse/jgit/api/RebaseCommand.java
+     * Revision: git 55b0203c319e5a4375ee36cedd8e1691e2588ff4
+     */
+    private static List<RevCommit> calculatePickList() throws IOException, GitAPIException {
+        Iterable<RevCommit> commitsToUse;
+        try (Git git = new Git(repo)) {
+            LogCommand cmd = git.log().addRange(renameCommit, headCommit);
+            commitsToUse = cmd.call();
         }
-        System.out.println(newBase);
-    }
-
-    private static final Map<RevCommit, ObjectId> tree = new HashMap<>();
-
-    private static ObjectId renameCommit(RevCommit cur, ObjectId target, String message) throws IOException {
-        if (tree.containsKey(cur)) {
-            return tree.get(cur);
+        List<RevCommit> cherryPickList = new ArrayList<>();
+        for (RevCommit commit : commitsToUse) {
+            cherryPickList.add(commit);
         }
+        Collections.reverse(cherryPickList);
 
+        walk.reset();
+        walk.setRevFilter(RevFilter.MERGE_BASE);
+        walk.markStart(renameCommit);
+        walk.markStart(headCommit);
+        RevCommit base;
 
+        Map<RevCommit, RevCommit> handled = new HashMap<>();
 
-        if (cur.equals(target)) {
-            ObjectInserter inserter = repo.getObjectDatabase().newInserter();
-            CommitBuilder cb = new CommitBuilder();
-
-            cb.setAuthor(cur.getAuthorIdent());
-            cb.setCommitter(cur.getCommitterIdent());
-            cb.setMessage(message);
-            cb.setParentIds(cur.getParents());
-            cb.setTreeId(cur.getTree());
-
-            ObjectId ret = inserter.insert(cb);
-
-            tree.put(cur, ret);
-
-            return ret;
+        while ((base = walk.next()) != null) {
+            System.out.println(base);
+            handled.put(base, renameCommit);
         }
 
-        RevCommit[] parents = cur.getParents();
-        ObjectId[] newParents = new ObjectId[parents.length];
-        for (int i = 0; i < parents.length; i++) {
-            newParents[i] = renameCommit(parents[i], target, message);
-        }
-
-        ObjectInserter inserter = repo.getObjectDatabase().newInserter();
-        CommitBuilder cb = new CommitBuilder();
-
-        cb.setAuthor(cur.getAuthorIdent());
-        cb.setCommitter(cur.getCommitterIdent());
-        cb.setMessage(cur.getFullMessage());
-        cb.setParentIds(newParents);
-        cb.setTreeId(cur.getTree());
-
-        ObjectId ret = inserter.insert(cb);
-
-        tree.put(cur, ret);
-
-        return ret;
-    }
-
-    /*private static void buildTree(RevCommit commit) {
-        if (visited.contains(commit) || commit.equals(renameObject)) {
-            return;
-        }
-
-        RevCommit[] parents = commit.getParents();
-        if (parents == null) {
-            System.out.println("Ooopsie");
-            return;
-        }
-        for (RevCommit parent : parents) {
-            Node parentNode;
-
-            if (tree.containsKey(parent)) {
-                parentNode = tree.get(parent);
-            } else {
-                parentNode = new Node(parent);
-                tree.put(parent, parentNode);
+        Iterator<RevCommit> iterator = cherryPickList.iterator();
+        pickLoop: while(iterator.hasNext()) {
+            RevCommit commit = iterator.next();
+            for (int i = 0; i < commit.getParentCount(); i++) {
+                boolean parentRewritten = handled.containsKey(commit.getParent(i));
+                if (parentRewritten) {
+                    handled.put(commit, null);
+                    continue pickLoop;
+                }
             }
-
-            parentNode.addChild(commit);
-            buildTree(parent);
+            // commit is only merged in, needs not be rewritten
+            iterator.remove();
         }
 
-        visited.add(commit);
-    }*/
+        return cherryPickList;
+    }
 
     public static void main(String[] args) {
         if (args.length != 2) {
@@ -119,41 +78,56 @@ public class Main {
         }
         try {
             FileRepositoryBuilder builder = new FileRepositoryBuilder();
-            repo = builder.setGitDir(new File("/home/rbblly/android/google-4.9/private/msm-google/.git"))
+            repo = builder.setGitDir(new File("/home/rbblly/JETBRAINS/git-fast-reword/test-repo/.git"))
                     .readEnvironment() // scan environment GIT_* variables
                     .findGitDir() // scan up the file system tree
                     .build();
 
-
             ObjectId headObject = repo.resolve("HEAD");
             ObjectId renameObject = repo.resolve(args[0]);
-            //RevWalk rew = new RevWalk(repo);
-            //RevCommit headCommit = rew.parseCommit(headObject);
-            //buildTree(headCommit);
+            walk = new RevWalk(repo);
+            headCommit = walk.parseCommit(headObject);
+            renameCommit = walk.parseCommit(renameObject);
+
+            List<RevCommit> pickList = calculatePickList();
+
+            Map<AnyObjectId, ObjectId> oldToNew = new HashMap<>(pickList.size() + 1);
+
+            ObjectInserter inserter = repo.getObjectDatabase().newInserter();
+            CommitBuilder cb = new CommitBuilder();
+
+            cb.setAuthor(renameCommit.getAuthorIdent());
+            cb.setCommitter(renameCommit.getCommitterIdent());
+            cb.setMessage(args[1]);
+            cb.setParentIds(renameCommit.getParents());
+            cb.setTreeId(renameCommit.getTree());
+
+            oldToNew.put(renameCommit, inserter.insert(cb));
+
+            for (RevCommit cmt : pickList) {
+                RevCommit[] oldParents = cmt.getParents();
+                List<AnyObjectId> parents = new ArrayList<>(oldParents.length);
+                for (RevCommit cur : oldParents) {
+                    parents.add(oldToNew.getOrDefault(cur, cur));
+                }
+
+                cb.setAuthor(cmt.getAuthorIdent());
+                cb.setCommitter(cmt.getCommitterIdent());
+                cb.setMessage(cmt.getFullMessage());
+                cb.setParentIds(parents);
+                cb.setTreeId(cmt.getTree());
+
+                oldToNew.put(cmt, inserter.insert(cb));
+            }
 
             System.out.println("Done !");
-
-            RevWalk revWalk = new PlotWalk(repo);
-            ObjectId rootId = headObject;
-            RevCommit root = revWalk.parseCommit(rootId);
-            revWalk.markStart(root);
-            RevCommitList<RevCommit> commitList = new RevCommitList<>();
-            commitList.source(revWalk);
-            commitList.fillTo(Integer.MAX_VALUE);
-
-            ObjectId result = renameCommit(commitList.get(0), renameObject, args[1]);
-
-            //PlotCommit<P> rename = (PlotCommit) revWalk.lookupCommit(renameObject);
-
-            /* commitList.
-            PlotCommit<PlotLane> headCommit = commitList.get(0);
-            renameCommit(headCommit, renameObject);*/
-
-            System.out.println(result);
+            System.out.println(oldToNew.get(pickList.get(pickList.size() - 1)));
 
 
         } catch (IOException e) {
             System.err.println(e.getMessage());
+            e.printStackTrace();
+        } catch (GitAPIException e) {
             e.printStackTrace();
         }
     }
