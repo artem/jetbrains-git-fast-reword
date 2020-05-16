@@ -13,7 +13,7 @@ import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 import java.io.IOException;
 import java.util.*;
 
-public class Main {
+public class FastReword {
     /*
      * Produces topologically sorted list of dependant commits to be regenerated after commit rename
      *
