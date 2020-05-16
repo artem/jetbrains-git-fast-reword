@@ -1,2 +1,7 @@
-# IDEA build output
+# Idea project files
+.idea/
+*.iml
+
+# Compilation output
 out/
+target/
