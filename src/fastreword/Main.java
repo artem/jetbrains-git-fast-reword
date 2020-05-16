@@ -2,6 +2,7 @@ package fastreword;
 
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.LogCommand;
+import org.eclipse.jgit.api.ResetCommand;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.lib.*;
 import org.eclipse.jgit.revwalk.RevCommit;
@@ -50,7 +51,6 @@ public class Main {
         Set<RevCommit> handled = new HashSet<>();
 
         while ((base = walk.next()) != null) {
-            System.out.println(base);
             handled.add(base);
         }
 
@@ -120,10 +120,15 @@ public class Main {
                 oldToNew.put(cmt, inserter.insert(cb));
             }
 
+
+            try (Git git = new Git(repo)) {
+                ObjectId newHead = oldToNew.get(pickList.get(pickList.size() - 1));
+                System.out.println(newHead.getName());
+                ResetCommand cmd = git.reset().setMode(ResetCommand.ResetType.SOFT).setRef(newHead.getName());
+                cmd.call();
+            }
+
             System.out.println("Done !");
-            System.out.println(oldToNew.get(pickList.get(pickList.size() - 1)));
-
-
         } catch (IOException e) {
             System.err.println(e.getMessage());
             e.printStackTrace();
