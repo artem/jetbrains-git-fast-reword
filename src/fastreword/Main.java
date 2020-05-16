@@ -10,27 +10,23 @@ import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.revwalk.filter.RevFilter;
 import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
 
-import java.io.File;
 import java.io.IOException;
 import java.util.*;
 
 public class Main {
-    private static Repository repo;
-    private static RevCommit headCommit;
-    private static RevCommit renameCommit;
-    private static RevWalk walk;
-
     /*
      * Generates topologically sorted list of dependant commits to be regenerated after commit rename
      *
      * Loosely based on JGit's calculatePickList() function
-     * We do not need transactionality as JGit, so file operations are replaced with Set access
+     * We do not need transactionality as JGit does, so file operations are replaced with Set access
      *
      * Repo:
      * Source: /org.eclipse.jgit/src/org/eclipse/jgit/api/RebaseCommand.java
      * Revision: git 55b0203c319e5a4375ee36cedd8e1691e2588ff4
      */
-    private static List<RevCommit> calculatePickList() throws IOException, GitAPIException {
+    private static List<RevCommit> calculatePickList(Repository repo, RevWalk walk,
+                                                     RevCommit headCommit, RevCommit renameCommit)
+                                                        throws IOException, GitAPIException {
         Iterable<RevCommit> commitsToUse;
         try (Git git = new Git(repo)) {
             LogCommand cmd = git.log().addRange(renameCommit, headCommit);
@@ -48,19 +44,20 @@ public class Main {
         walk.markStart(headCommit);
         RevCommit base;
 
-        Set<RevCommit> handled = new HashSet<>();
+        Set<RevCommit> visited = new HashSet<>();
 
         while ((base = walk.next()) != null) {
-            handled.add(base);
+            visited.add(base);
         }
 
         Iterator<RevCommit> iterator = cherryPickList.iterator();
-        pickLoop: while(iterator.hasNext()) {
+        pickLoop:
+        while (iterator.hasNext()) {
             RevCommit commit = iterator.next();
             for (int i = 0; i < commit.getParentCount(); i++) {
-                boolean parentRewritten = handled.contains(commit.getParent(i));
+                boolean parentRewritten = visited.contains(commit.getParent(i));
                 if (parentRewritten) {
-                    handled.add(commit);
+                    visited.add(commit);
                     continue pickLoop;
                 }
             }
@@ -73,25 +70,38 @@ public class Main {
 
     public static void main(String[] args) {
         if (args.length != 2) {
-            System.out.println("Usage: <reference> <message>");
-            return;
+            System.err.println("Usage: <reference> <message>");
+            System.exit(1);
         }
-        try {
-            FileRepositoryBuilder builder = new FileRepositoryBuilder();
-            repo = builder.setGitDir(new File("/home/rbblly/JETBRAINS/git-fast-reword/test-repo/.git"))
-                    .readEnvironment() // scan environment GIT_* variables
-                    .findGitDir() // scan up the file system tree
-                    .build();
 
-            ObjectId headObject = repo.resolve("HEAD");
+        FileRepositoryBuilder builder = new FileRepositoryBuilder()
+                .readEnvironment() // scan environment GIT_* variables
+                .findGitDir();     // discover git repository
+
+        if (builder.getGitDir() == null) {
+            System.err.println("fatal: git repository not found");
+            System.exit(1);
+        }
+
+        try (Repository repo = builder.build()) {
+            RevWalk walk = new RevWalk(repo);
+
             ObjectId renameObject = repo.resolve(args[0]);
-            walk = new RevWalk(repo);
-            headCommit = walk.parseCommit(headObject);
-            renameCommit = walk.parseCommit(renameObject);
 
-            List<RevCommit> pickList = calculatePickList();
+            if (renameObject == null) {
+                System.err.println("fatal: unknown reference: " + args[0]);
+                System.exit(1);
+            }
 
-            Map<AnyObjectId, ObjectId> oldToNew = new HashMap<>(pickList.size() + 1);
+            RevCommit headCommit = walk.parseCommit(repo.resolve("HEAD"));
+            RevCommit renameCommit = walk.parseCommit(renameObject);
+
+            if (!walk.isMergedInto(renameCommit, headCommit)) {
+                System.err.println("fatal: target is not merged in HEAD");
+                System.exit(1);
+            }
+
+            List<RevCommit> pickList = calculatePickList(repo, walk, headCommit, renameCommit);
 
             ObjectInserter inserter = repo.getObjectDatabase().newInserter();
             CommitBuilder cb = new CommitBuilder();
@@ -102,38 +112,44 @@ public class Main {
             cb.setParentIds(renameCommit.getParents());
             cb.setTreeId(renameCommit.getTree());
 
-            oldToNew.put(renameCommit, inserter.insert(cb));
+            ObjectId newHead;
 
-            for (RevCommit cmt : pickList) {
-                RevCommit[] oldParents = cmt.getParents();
-                List<AnyObjectId> parents = new ArrayList<>(oldParents.length);
-                for (RevCommit cur : oldParents) {
-                    parents.add(oldToNew.getOrDefault(cur, cur));
+            if (pickList.isEmpty()) { // We are trying to rename HEAD
+                newHead = inserter.insert(cb);
+            } else {
+                Map<AnyObjectId, ObjectId> oldToNew = new HashMap<>(pickList.size() + 1);
+                oldToNew.put(renameCommit, inserter.insert(cb));
+
+                for (RevCommit cmt : pickList) {
+                    RevCommit[] oldParents = cmt.getParents();
+                    List<AnyObjectId> newParents = new ArrayList<>(oldParents.length);
+
+                    for (RevCommit cur : oldParents) {
+                        newParents.add(oldToNew.getOrDefault(cur, cur));
+                    }
+
+                    cb.setAuthor(cmt.getAuthorIdent());
+                    cb.setCommitter(cmt.getCommitterIdent());
+                    cb.setMessage(cmt.getFullMessage());
+                    cb.setParentIds(newParents);
+                    cb.setTreeId(cmt.getTree());
+
+                    oldToNew.put(cmt, inserter.insert(cb));
                 }
 
-                cb.setAuthor(cmt.getAuthorIdent());
-                cb.setCommitter(cmt.getCommitterIdent());
-                cb.setMessage(cmt.getFullMessage());
-                cb.setParentIds(parents);
-                cb.setTreeId(cmt.getTree());
-
-                oldToNew.put(cmt, inserter.insert(cb));
+                newHead = oldToNew.get(pickList.get(pickList.size() - 1));
             }
 
-
             try (Git git = new Git(repo)) {
-                ObjectId newHead = oldToNew.get(pickList.get(pickList.size() - 1));
-                System.out.println(newHead.getName());
+                System.out.println("New HEAD: " + newHead.getName());
+
                 ResetCommand cmd = git.reset().setMode(ResetCommand.ResetType.SOFT).setRef(newHead.getName());
                 cmd.call();
             }
-
-            System.out.println("Done !");
-        } catch (IOException e) {
+        } catch (Exception e) {
             System.err.println(e.getMessage());
             e.printStackTrace();
-        } catch (GitAPIException e) {
-            e.printStackTrace();
+            System.exit(1);
         }
     }
 }
