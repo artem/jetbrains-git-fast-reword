@@ -23,7 +23,7 @@ public class Main {
      * Generates topologically sorted list of dependant commits to be regenerated after commit rename
      *
      * Loosely based on JGit's calculatePickList() function
-     * We do not need transactionality as JGit, so file operations are replaced with map access
+     * We do not need transactionality as JGit, so file operations are replaced with Set access
      *
      * Repo:
      * Source: /org.eclipse.jgit/src/org/eclipse/jgit/api/RebaseCommand.java
@@ -47,20 +47,20 @@ public class Main {
         walk.markStart(headCommit);
         RevCommit base;
 
-        Map<RevCommit, RevCommit> handled = new HashMap<>();
+        Set<RevCommit> handled = new HashSet<>();
 
         while ((base = walk.next()) != null) {
             System.out.println(base);
-            handled.put(base, renameCommit);
+            handled.add(base);
         }
 
         Iterator<RevCommit> iterator = cherryPickList.iterator();
         pickLoop: while(iterator.hasNext()) {
             RevCommit commit = iterator.next();
             for (int i = 0; i < commit.getParentCount(); i++) {
-                boolean parentRewritten = handled.containsKey(commit.getParent(i));
+                boolean parentRewritten = handled.contains(commit.getParent(i));
                 if (parentRewritten) {
-                    handled.put(commit, null);
+                    handled.add(commit);
                     continue pickLoop;
                 }
             }
