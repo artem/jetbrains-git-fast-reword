@@ -15,7 +15,7 @@ import java.util.*;
 
 public class Main {
     /*
-     * Generates topologically sorted list of dependant commits to be regenerated after commit rename
+     * Produces topologically sorted list of dependant commits to be regenerated after commit rename
      *
      * Loosely based on JGit's calculatePickList() function
      * We do not need transactionality as JGit does, so file operations are replaced with Set access
@@ -76,6 +76,7 @@ public class Main {
         ObjectInserter inserter = repo.getObjectDatabase().newInserter();
         CommitBuilder cb = new CommitBuilder();
 
+        // Fill CommitBuilder with renameCommit metadata
         cb.setAuthor(renameCommit.getAuthorIdent());
         cb.setCommitter(renameCommit.getCommitterIdent());
         cb.setMessage(newMessage);
@@ -87,7 +88,9 @@ public class Main {
         if (pickList.isEmpty()) { // We are trying to rename HEAD
             newHead = inserter.insert(cb);
         } else {
+            // Store new ObjectIDs to avoid setting a stale parent hash
             Map<AnyObjectId, ObjectId> oldToNew = new HashMap<>(pickList.size() + 1);
+            // Invalidate original renameCommit and write its replacement to ObjectDB
             oldToNew.put(renameCommit, inserter.insert(cb));
 
             for (RevCommit cmt : pickList) {
@@ -107,6 +110,7 @@ public class Main {
                 oldToNew.put(cmt, inserter.insert(cb));
             }
 
+            // New HEAD should be updated tail of pickList
             newHead = oldToNew.get(pickList.get(pickList.size() - 1));
         }
 
@@ -133,7 +137,7 @@ public class Main {
 
             ObjectId renameObject = repo.resolve(args[0]);
 
-            if (renameObject == null) {
+            if (renameObject == null) { // Object not found by reference
                 System.err.println("fatal: unknown reference: " + args[0]);
                 throw new IllegalArgumentException("Unknown reference");
             }
