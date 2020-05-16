@@ -113,10 +113,10 @@ public class Main {
         return newHead;
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws IOException, GitAPIException {
         if (args.length != 2) {
             System.err.println("Usage: <reference> <message>");
-            System.exit(1);
+            throw new IllegalArgumentException("Wrong argument count");
         }
 
         FileRepositoryBuilder builder = new FileRepositoryBuilder()
@@ -125,7 +125,7 @@ public class Main {
 
         if (builder.getGitDir() == null) {
             System.err.println("fatal: git repository not found");
-            System.exit(1);
+            throw new IllegalStateException("Repository not found");
         }
 
         try (Repository repo = builder.build()) {
@@ -135,7 +135,7 @@ public class Main {
 
             if (renameObject == null) {
                 System.err.println("fatal: unknown reference: " + args[0]);
-                System.exit(1);
+                throw new IllegalArgumentException("Unknown reference");
             }
 
             RevCommit headCommit = walk.parseCommit(repo.resolve("HEAD"));
@@ -143,7 +143,7 @@ public class Main {
 
             if (!walk.isMergedInto(renameCommit, headCommit)) {
                 System.err.println("fatal: target is not merged in HEAD");
-                System.exit(1);
+                throw new IllegalArgumentException("Target is not merged in HEAD");
             }
 
             List<RevCommit> pickList = calculatePickList(repo, walk, headCommit, renameCommit);
@@ -156,10 +156,6 @@ public class Main {
                 ResetCommand cmd = git.reset().setMode(ResetCommand.ResetType.SOFT).setRef(newHead.getName());
                 cmd.call();
             }
-        } catch (Exception e) {
-            System.err.println(e.getMessage());
-            e.printStackTrace();
-            System.exit(1);
         }
     }
 }
