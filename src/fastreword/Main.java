@@ -68,6 +68,51 @@ public class Main {
         return cherryPickList;
     }
 
+    /*
+     * Adds commits with recalculated metadata to object db
+     */
+    private static ObjectId rewind(Repository repo, RevCommit renameCommit,
+                                   String newMessage, List<RevCommit> pickList) throws IOException {
+        ObjectInserter inserter = repo.getObjectDatabase().newInserter();
+        CommitBuilder cb = new CommitBuilder();
+
+        cb.setAuthor(renameCommit.getAuthorIdent());
+        cb.setCommitter(renameCommit.getCommitterIdent());
+        cb.setMessage(newMessage);
+        cb.setParentIds(renameCommit.getParents());
+        cb.setTreeId(renameCommit.getTree());
+
+        ObjectId newHead;
+
+        if (pickList.isEmpty()) { // We are trying to rename HEAD
+            newHead = inserter.insert(cb);
+        } else {
+            Map<AnyObjectId, ObjectId> oldToNew = new HashMap<>(pickList.size() + 1);
+            oldToNew.put(renameCommit, inserter.insert(cb));
+
+            for (RevCommit cmt : pickList) {
+                RevCommit[] oldParents = cmt.getParents();
+                List<AnyObjectId> newParents = new ArrayList<>(oldParents.length);
+
+                for (RevCommit cur : oldParents) {
+                    newParents.add(oldToNew.getOrDefault(cur, cur));
+                }
+
+                cb.setAuthor(cmt.getAuthorIdent());
+                cb.setCommitter(cmt.getCommitterIdent());
+                cb.setMessage(cmt.getFullMessage());
+                cb.setParentIds(newParents);
+                cb.setTreeId(cmt.getTree());
+
+                oldToNew.put(cmt, inserter.insert(cb));
+            }
+
+            newHead = oldToNew.get(pickList.get(pickList.size() - 1));
+        }
+
+        return newHead;
+    }
+
     public static void main(String[] args) {
         if (args.length != 2) {
             System.err.println("Usage: <reference> <message>");
@@ -103,42 +148,7 @@ public class Main {
 
             List<RevCommit> pickList = calculatePickList(repo, walk, headCommit, renameCommit);
 
-            ObjectInserter inserter = repo.getObjectDatabase().newInserter();
-            CommitBuilder cb = new CommitBuilder();
-
-            cb.setAuthor(renameCommit.getAuthorIdent());
-            cb.setCommitter(renameCommit.getCommitterIdent());
-            cb.setMessage(args[1]);
-            cb.setParentIds(renameCommit.getParents());
-            cb.setTreeId(renameCommit.getTree());
-
-            ObjectId newHead;
-
-            if (pickList.isEmpty()) { // We are trying to rename HEAD
-                newHead = inserter.insert(cb);
-            } else {
-                Map<AnyObjectId, ObjectId> oldToNew = new HashMap<>(pickList.size() + 1);
-                oldToNew.put(renameCommit, inserter.insert(cb));
-
-                for (RevCommit cmt : pickList) {
-                    RevCommit[] oldParents = cmt.getParents();
-                    List<AnyObjectId> newParents = new ArrayList<>(oldParents.length);
-
-                    for (RevCommit cur : oldParents) {
-                        newParents.add(oldToNew.getOrDefault(cur, cur));
-                    }
-
-                    cb.setAuthor(cmt.getAuthorIdent());
-                    cb.setCommitter(cmt.getCommitterIdent());
-                    cb.setMessage(cmt.getFullMessage());
-                    cb.setParentIds(newParents);
-                    cb.setTreeId(cmt.getTree());
-
-                    oldToNew.put(cmt, inserter.insert(cb));
-                }
-
-                newHead = oldToNew.get(pickList.get(pickList.size() - 1));
-            }
+            ObjectId newHead = rewind(repo, renameCommit, args[1], pickList);
 
             try (Git git = new Git(repo)) {
                 System.out.println("New HEAD: " + newHead.getName());
